@@ -1,0 +1,13 @@
+# tw-ical.rc — configuration for tw-ical-hook
+# Copy to ~/.task/config/tw-ical.rc and edit before first run.
+
+# Directory for .ics files (one per task, vdir format for Radicale/khal)
+ics_dir=~/.task/time/ics
+
+# Keep completed tasks as COMPLETED VTODOs (yes/no)
+# Set to 'no' to delete .ics when task is marked done
+keep_completed=yes
+
+# How many days of completed tasks to retain (0 = keep forever)
+# Requires running tw-ical-export.py --clean periodically (e.g. via cron)
+completed_days=90
