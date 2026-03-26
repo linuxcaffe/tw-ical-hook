@@ -13,7 +13,7 @@ if _os_timing.environ.get('TW_TIMING'):
 
 """
 on-modify_tw-ical.py — Taskwarrior on-modify hook
-Updates or removes a VTODO .ics file when a task changes.
+Updates or removes a VEVENT .ics file when a task changes.
 Handles: modify, done, delete, start, stop, annotate, etc.
 Install: ~/.task/hooks/on-modify_tw-ical.py
 """

@@ -12,14 +12,15 @@ if _os_timing.environ.get('TW_TIMING'):
     _atexit.register(_report_timing)
 
 """
-tw-ical-export.py — Bulk export Taskwarrior tasks to VTODO .ics files.
+tw-ical-export.py — Bulk export Taskwarrior tasks to VEVENT .ics files.
 
 Usage:
-  python3 tw-ical-export.py              # export all pending + scheduled tasks
+  python3 tw-ical-export.py              # export all pending tasks
   python3 tw-ical-export.py --all        # export all tasks including completed
   python3 tw-ical-export.py --clean      # remove .ics files with no matching task
   python3 tw-ical-export.py <filter>     # e.g. project:work or +tag
 
+Only tasks with due: or scheduled: dates generate .ics files.
 Run once to initialise ~/.task/time/ics/, then re-run any time to repair.
 The hooks (on-add, on-modify) keep things in sync during normal use.
 """
@@ -101,13 +102,14 @@ def export(filter_args: list, cfg: dict) -> int:
         return 1
 
     tasks = json.loads(result.stdout or '[]')
-    count = 0
+    written = 0
     for task in tasks:
         write_vtodo(task, cfg)
-        count += 1
+        if any(task.get(f) for f in ('scheduled', 'due')):
+            written += 1
 
     ics_dir = Path(cfg['ics_dir']).expanduser()
-    print(f'tw-ical: exported {count} tasks → {ics_dir}')
+    print(f'tw-ical: {written}/{len(tasks)} tasks have dates → {ics_dir}')
     return 0
 
 

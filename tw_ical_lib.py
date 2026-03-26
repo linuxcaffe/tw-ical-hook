@@ -23,7 +23,7 @@ Imported by on-add_tw-ical.py, on-modify_tw-ical.py, and tw-ical-export.py
 import os
 import sys
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 
 # Debug configuration (default 0, triggered by tw --debug=2)
@@ -85,9 +85,10 @@ CONFIG_FILE = Path.home() / '.task' / 'config' / 'tw-ical.rc'
 
 def load_config() -> dict:
     cfg = {
-        'ics_dir':        '~/.task/time/ics',
-        'keep_completed': 'yes',
-        'completed_days': '90',
+        'ics_dir':          '~/.task/time/ics',
+        'keep_completed':   'yes',
+        'completed_days':   '90',
+        'default_duration': 'PT1H',
     }
     if not CONFIG_FILE.exists():
         return cfg
@@ -113,12 +114,10 @@ def _escape(text: str) -> str:
 
 def _fold(line: str) -> str:
     """iCal line folding: max 75 octets per line, continuation indented by space."""
-    encoded = line.encode('utf-8')
-    if len(encoded) <= 75:
+    if len(line.encode('utf-8')) <= 75:
         return line
     parts = []
     while len(line.encode('utf-8')) > 75:
-        # step back from 75 to avoid splitting a multibyte char
         cut = 75
         while len(line[:cut].encode('utf-8')) > 75:
             cut -= 1
@@ -132,73 +131,87 @@ def _priority(p: str) -> str:
     return {'H': '1', 'M': '5', 'L': '9'}.get(p, '0')
 
 
-def _status(s: str) -> str:
+def _vevent_status(s: str) -> str:
     return {
-        'pending':   'NEEDS-ACTION',
-        'waiting':   'NEEDS-ACTION',
-        'recurring': 'NEEDS-ACTION',
-        'completed': 'COMPLETED',
+        'completed': 'CANCELLED',   # hide from active calendar view
         'deleted':   'CANCELLED',
-    }.get(s, 'NEEDS-ACTION')
+    }.get(s, 'CONFIRMED')
 
 
-# ── Task → VTODO ───────────────────────────────────────────────────────────
+# ── Task → VEVENT(s) ────────────────────────────────────────────────────────
 
-def task_to_vtodo(task: dict) -> str:
-    now = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
-    uid = f"{task['uuid']}@taskwarrior"
+# Date fields that each generate their own VEVENT, with summary prefix + X-property
+_DATE_FIELDS = [
+    ('scheduled', '[sched]', 'SCHEDULED'),
+    ('due',       '[due]',   'DUE'),
+]
+
+
+def _vevent_props(task: dict, date_field: str, prefix: str,
+                  x_type: str, cfg: dict, now: str) -> list:
+    """Return list of (name, value) pairs for one VEVENT."""
+    uid      = f"{task['uuid']}-{date_field}@taskwarrior"
+    duration = task.get('duration') or cfg.get('default_duration', 'PT1H')
+    summary  = f"{prefix} {_escape(task['description'])}"
 
     props = [
         ('UID',           uid),
         ('DTSTAMP',       now),
         ('CREATED',       task.get('entry',    now)),
         ('LAST-MODIFIED', task.get('modified', now)),
-        ('SUMMARY',       _escape(task['description'])),
-        ('STATUS',        _status(task.get('status', 'pending'))),
+        ('DTSTART',       task[date_field]),
+        ('DURATION',      duration.upper()),
+        ('SUMMARY',       summary),
+        ('STATUS',        _vevent_status(task.get('status', 'pending'))),
+        ('X-TW-DATE-TYPE', x_type),
+        ('X-TW-UUID',     task['uuid']),
     ]
 
-    if task.get('scheduled'):
-        props.append(('DTSTART', task['scheduled']))
-    if task.get('due'):
-        props.append(('DUE', task['due']))
     if task.get('priority'):
         props.append(('PRIORITY', _priority(task['priority'])))
 
-    # tags + project → CATEGORIES
     cats = list(task.get('tags', []))
     if task.get('project'):
-        # replace : with . so project hierarchy survives as a category string
         cats.append('project.' + task['project'].replace(':', '.'))
     if cats:
         props.append(('CATEGORIES', ','.join(_escape(c) for c in cats)))
 
-    # annotations → DESCRIPTION
     if task.get('annotations'):
         desc = '\\n'.join(_escape(a['description']) for a in task['annotations'])
         props.append(('DESCRIPTION', desc))
 
-    if task.get('status') == 'completed' and task.get('end'):
-        props.append(('COMPLETED', task['end']))
-
-    # stash urgency as a custom property so it round-trips cleanly
     if task.get('urgency') is not None:
         props.append(('X-TW-URGENCY', str(round(task['urgency'], 2))))
+
+    return props
+
+
+def task_to_ical(task: dict, cfg: dict) -> str:
+    """Generate a VCALENDAR with one VEVENT per date field present on the task."""
+    now = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
 
     lines = [
         'BEGIN:VCALENDAR',
         'VERSION:2.0',
-        'PRODID:-//tw-ical-hook//tw-ical-hook 0.1.0//EN',
-        'BEGIN:VTODO',
+        'PRODID:-//tw-ical-hook//tw2ical 0.1.1//EN',
     ]
-    lines += [_fold(f'{k}:{v}') for k, v in props]
-    lines += ['END:VTODO', 'END:VCALENDAR', '']
 
+    for field, prefix, x_type in _DATE_FIELDS:
+        if not task.get(field):
+            continue
+        props = _vevent_props(task, field, prefix, x_type, cfg, now)
+        lines.append('BEGIN:VEVENT')
+        lines += [_fold(f'{k}:{v}') for k, v in props]
+        lines.append('END:VEVENT')
+
+    lines += ['END:VCALENDAR', '']
     return '\r\n'.join(lines)
 
 
 # ── Write / remove ─────────────────────────────────────────────────────────
 
 def write_vtodo(task: dict, cfg: dict):
+    """Write (or remove) the .ics file for a task. Name kept for hook compatibility."""
     ics_dir = Path(cfg['ics_dir']).expanduser()
     ics_dir.mkdir(parents=True, exist_ok=True)
     ics_file = ics_dir / f"{task['uuid']}.ics"
@@ -209,9 +222,13 @@ def write_vtodo(task: dict, cfg: dict):
         ics_file.unlink(missing_ok=True)
         return
 
-    if status == 'completed':
-        if cfg.get('keep_completed', 'yes').lower() == 'no':
-            ics_file.unlink(missing_ok=True)
-            return
+    if status == 'completed' and cfg.get('keep_completed', 'yes').lower() == 'no':
+        ics_file.unlink(missing_ok=True)
+        return
 
-    ics_file.write_text(task_to_vtodo(task))
+    # Only write if the task has at least one calendar-relevant date
+    if not any(task.get(f) for f, _, _ in _DATE_FIELDS):
+        ics_file.unlink(missing_ok=True)
+        return
+
+    ics_file.write_text(task_to_ical(task, cfg))

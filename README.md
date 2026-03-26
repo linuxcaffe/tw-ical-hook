@@ -7,12 +7,12 @@ Keep your Taskwarrior tasks in sync with any calendar that speaks iCalendar.
 
 ## TL;DR
 
-- Writes a standard `.ics` VTODO file for every task — automatically, on add and modify
-- `due:` dates appear as `DUE`, `scheduled:` dates as `DTSTART` — tasks with both span a range
+- Writes a VEVENT `.ics` for every task with a `due:` or `scheduled:` date — automatically, on add and modify
+- Each date field generates its own calendar event: `[due] buy milk`, `[sched] write report`
+- Event duration comes from `uda.duration` per task, or `default_duration` in config (default 1h)
 - Tags and project become `CATEGORIES`, annotations become `DESCRIPTION`
-- Completed tasks stay in the calendar as `COMPLETED`; deleted tasks are removed
-- Works with any CalDAV server (Radicale, Nextcloud, etc.) and any iCal client
-- Pairs naturally with [khal](https://lostpackets.de/khal/) (CLI calendar) and [DAVx⁵](https://www.davx5.com/) (Android sync)
+- Completed tasks stay in the calendar as cancelled events; deleted tasks are removed
+- Works with khal directly, or any CalDAV server (Radicale, Nextcloud, etc.) + DAVx⁵ on Android
 - Bulk export/repair with `tw-ical-export.py` — run once to bootstrap, re-run to fix drift
 - Requires Taskwarrior 2.6.0+, Python 3.6+
 
@@ -23,26 +23,40 @@ dates sit invisibly in the database — nothing reminds you about them at 9am, n
 them alongside meetings, nothing syncs them to your phone. The only way to see them is to
 run `task next` and remember to look.
 
-CalDAV clients — khal on the desktop, any calendar app on Android via DAVx⁵ — understand
-VTODO, the task component of the iCalendar standard. They can display deadlines, show
-scheduled work blocks, send reminders, and sync across devices. But they need `.ics` files
-to work from.
+Calendar clients — khal on the desktop, any calendar app on Android via DAVx⁵ — understand
+VEVENT, the calendar event component of the iCalendar standard. They display events by date,
+send reminders, and sync across devices. But they need `.ics` files to work from.
 
 The gap between Taskwarrior and the calendar world is a directory of `.ics` files. tw2ical
-fills it. Every time you add or modify a task, the corresponding `.ics` is written. Your
-CalDAV server serves that directory. Your calendar client connects to your CalDAV server.
+fills it. Every time you add or modify a task, the hook writes (or removes) the corresponding
+`.ics`. Your calendar client picks it up immediately.
 
 ## What this means for you
 
-Your due dates and scheduled blocks show up in your calendar alongside everything else —
+Your due dates and scheduled blocks show up in `khal list` alongside everything else —
 on your laptop, on your phone — without any extra steps after the initial setup. Tasks you
 complete disappear from the active view. You stop context-switching between Taskwarrior and
 your calendar to get a full picture of your day.
 
+## Design
+
+**One VEVENT per date field.** A task with `scheduled:monday` produces a `[sched]` event on
+Monday. A task with `due:friday` produces a `[due]` event on Friday. A task with both
+produces two events in the same `.ics` file. Tasks with neither date produce no `.ics`.
+
+**Duration.** iCal events need a time span. tw2ical uses `uda.duration` if set on the task,
+otherwise falls back to `default_duration` in the config (default `PT1H`). The `duration` UDA
+is a general-purpose work-estimate field — useful beyond tw2ical for time tracking and
+planning. Set it per-task: `task 42 modify duration:PT30M`.
+
+**X-properties** carry Taskwarrior metadata for round-tripping: `X-TW-UUID`, `X-TW-DATE-TYPE`
+(`SCHEDULED` or `DUE`), `X-TW-URGENCY`.
+
 ## Core concepts
 
-**VTODO** — the task component of the iCalendar standard (RFC 5545). Each `.ics` file
-contains one VTODO. CalDAV servers and calendar clients understand this format natively.
+**VEVENT** — the calendar event component of the iCalendar standard (RFC 5545). Each `.ics`
+file contains one VCALENDAR with up to two VEVENTs (one per date field). All calendar clients
+understand this format natively.
 
 **vdir** — a directory of `.ics` files, one per entry. This is the format Radicale serves
 and khal reads directly. tw2ical writes to a vdir.
@@ -78,6 +92,10 @@ cp tw_ical_lib.py tw-ical-export.py ~/.task/scripts/
 # config (edit before first run)
 cp tw-ical.rc ~/.task/config/
 
+# register the duration UDA in taskwarrior
+echo "uda.duration.type=duration" >> ~/.taskrc
+echo "uda.duration.label=Duration" >> ~/.taskrc
+
 # bootstrap existing tasks
 python3 ~/.task/scripts/tw-ical-export.py
 ```
@@ -90,13 +108,36 @@ python3 ~/.task/scripts/tw-ical-export.py
 # Directory for .ics files — serve this with Radicale or point khal here
 ics_dir=~/.task/time/ics
 
-# Keep completed tasks as COMPLETED VTODOs (yes/no)
+# Default event duration (ISO 8601) — used when task has no uda.duration
+# PT1H = 1 hour, PT30M = 30 min, P1D = all day
+default_duration=PT1H
+
+# Keep completed tasks as cancelled events (yes/no)
 # 'no' deletes the .ics when a task is marked done
 keep_completed=yes
 
 # Retain completed tasks for this many days (0 = keep forever)
 # Requires running tw-ical-export.py --clean periodically
 completed_days=90
+```
+
+**khal config** (`~/.config/khal/config`):
+
+```ini
+[calendars]
+
+[[tasks]]
+path = ~/.task/time/ics
+type = calendar
+
+[locale]
+local_timezone = America/Toronto   # set to your timezone
+timeformat = %H:%M
+dateformat = %m/%d/%Y
+datetimeformat = %m/%d/%Y %H:%M
+
+[default]
+default_calendar = tasks
 ```
 
 ## Usage
@@ -115,10 +156,11 @@ python3 ~/.task/scripts/tw-ical-export.py --clean
 
 **After that, the hooks keep everything in sync automatically:**
 ```bash
-task add "buy coffee" due:tomorrow scheduled:today   # → .ics written immediately
-task 42 done                                         # → .ics updated to COMPLETED
-task 43 delete                                       # → .ics removed
-task 44 modify description:"new wording"             # → .ics rewritten
+task add "buy coffee" due:tomorrow                   # → [due] event written
+task add "write report" scheduled:monday due:friday  # → two events written
+task 42 modify duration:PT2H                         # → event lengthened to 2h
+task 43 done                                         # → event marked cancelled
+task 44 delete                                       # → .ics removed
 ```
 
 **Wire up Radicale to serve the vdir:**
@@ -129,36 +171,26 @@ filesystem_folder = ~/.task/time
 ```
 Then point DAVx⁵ or khal at `http://localhost:5232`.
 
-**khal direct (no CalDAV server needed for local use):**
-```ini
-# ~/.config/khal/config
-[[calendars]]
-[[[tasks]]]
-path = ~/.task/time/ics/
-type = discover
-```
-
 ## Example workflow
 
 1. Add a task with a scheduled block and a deadline:
    ```bash
    task add "write quarterly report" scheduled:monday due:friday project:work
    ```
-2. The hook writes `~/.task/time/ics/<uuid>.ics` immediately.
-3. Radicale picks up the new file; DAVx⁵ syncs to Android within minutes.
-4. Your phone calendar shows "write quarterly report" starting Monday, due Friday.
-5. When you finish: `task <id> done` — the VTODO status changes to `COMPLETED`.
-6. The task disappears from your active calendar view (filtered by your CalDAV client).
+2. The hook writes `~/.task/time/ics/<uuid>.ics` with two VEVENTs immediately.
+3. `khal list` shows `[sched] write quarterly report` on Monday and `[due] write quarterly report` on Friday.
+4. Radicale picks up the new file; DAVx⁵ syncs to Android within minutes.
+5. When you finish: `task <id> done` — both events become cancelled (hidden from active view).
 
 ## Project status
 
-⚠️ Early release. Core hook functionality is working. CalDAV server setup and khal
-integration require manual configuration. Recurrence and task dependencies are not yet
-mapped to iCal equivalents.
+Early release. Core hook functionality is working. khal integration works out of the box.
+CalDAV server setup (Radicale + DAVx⁵) requires manual configuration.
+Recurrence and task dependencies are not yet mapped to iCal equivalents.
 
 ## Further reading
 
-- [iCalendar VTODO spec (RFC 5545)](https://www.rfc-editor.org/rfc/rfc5545)
+- [iCalendar VEVENT spec (RFC 5545)](https://www.rfc-editor.org/rfc/rfc5545)
 - [Radicale — lightweight CalDAV server](https://radicale.org/)
 - [khal — CLI calendar for vdir/CalDAV](https://lostpackets.de/khal/)
 - [vdirsyncer — sync CalDAV to local vdir](https://vdirsyncer.pimutils.org/)
@@ -170,5 +202,5 @@ mapped to iCal equivalents.
 - Language: Python 3
 - Requires: Taskwarrior 2.6.0+, Python 3.6+
 - Platforms: Linux
-- Version: 0.1.0
+- Version: 0.1.1
 - Author: linuxcaffe + Claude Sonnet 4.6

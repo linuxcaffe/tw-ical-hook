@@ -4,7 +4,12 @@
 # Directory for .ics files (one per task, vdir format for Radicale/khal)
 ics_dir=~/.task/time/ics
 
-# Keep completed tasks as COMPLETED VTODOs (yes/no)
+# Default duration for calendar events (ISO 8601 duration)
+# Used when a task has no uda.duration set.
+# PT1H = 1 hour, PT30M = 30 minutes, P1D = all day
+default_duration=PT1H
+
+# Keep completed tasks as CANCELLED VEVENTs (yes/no)
 # Set to 'no' to delete .ics when task is marked done
 keep_completed=yes
 

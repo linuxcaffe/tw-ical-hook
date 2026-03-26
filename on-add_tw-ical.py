@@ -13,7 +13,7 @@ if _os_timing.environ.get('TW_TIMING'):
 
 """
 on-add_tw-ical.py — Taskwarrior on-add hook
-Writes a VTODO .ics file when a task is created.
+Writes a VEVENT .ics file when a task with due: or scheduled: is created.
 Install: ~/.task/hooks/on-add_tw-ical.py
 """
 
